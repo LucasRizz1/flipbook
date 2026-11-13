@@ -1,0 +1,78 @@
+{
+  "title": "DheyTécnica",
+  "version": "20261113112104",
+  "pages": 28,
+  "pageWidth": 595.28,
+  "pageHeight": 841.89,
+  "sizes": [
+    {
+      "width": 400,
+      "path": "pages/400/{n}.webp"
+    },
+    {
+      "width": 1200,
+      "path": "pages/1200/{n}.webp"
+    },
+    {
+      "width": 2400,
+      "path": "pages/2400/{n}.webp"
+    }
+  ],
+  "links": {
+    "1": [
+      {
+        "x": 89.755,
+        "y": 75.292,
+        "w": 3.514,
+        "h": 19.603,
+        "url": "https://dheytecnica.com.br"
+      }
+    ],
+    "28": [
+      {
+        "x": 20.178,
+        "y": 90.744,
+        "w": 15.112,
+        "h": 1.481,
+        "url": "https://www.dheytecnica.com.br"
+      }
+    ]
+  },
+  "vector": {
+    "bg": "pages/bg/{n}.webp",
+    "bgWidth": 2400,
+    "text": "pages/text/{n}.svg",
+    "pages": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28
+    ]
+  },
+  "lang": "en",
+  "pdf": "Catalogo-DheyTecnica-V8-EN-FINAL.pdf"
+}
