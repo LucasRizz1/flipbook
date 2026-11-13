@@ -146,7 +146,12 @@ async function main() {
     app.style.setProperty('--ax1', Math.round(b.x1 + 12) + 'px');
     app.classList.toggle('no-arrows', book.sw < 720 || book.sh < 480);
     const p = info.pages[0];
-    if (pageFromHash() !== p) history.replaceState(null, '', p > 1 ? '#p=' + p : location.pathname + location.search);
+    // só mexe no endereço quando a página muda (o Safari limita chamadas de replaceState)
+    if ((pageFromHash() || 1) !== p) {
+      try {
+        history.replaceState(null, '', p > 1 ? '#p=' + p : location.pathname + location.search);
+      } catch (_) {}
+    }
     markThumb(info.index);
   }
 
@@ -199,7 +204,8 @@ async function main() {
       buildThumbs();
       markThumb(book.targetIndex, true);
       el.scrim.hidden = false;
-      requestAnimationFrame(() => el.scrim.classList.add('on'));
+      void el.scrim.offsetWidth; // aplica o estado inicial antes de animar (senão o escurecido "pula")
+      el.scrim.classList.add('on');
     } else {
       el.scrim.classList.remove('on');
       setTimeout(() => {
@@ -311,6 +317,8 @@ async function main() {
         ...pages.map((n) => {
           const im = new Image();
           im.alt = '';
+          im.width = meta.pageWidth; // reserva o formato antes de a imagem chegar
+          im.height = meta.pageHeight;
           im.src = book.thumbUrl(n);
           return im;
         })
@@ -319,8 +327,12 @@ async function main() {
     const min = +el.pageRange.min;
     const max = +el.pageRange.max;
     const pct = max > min ? (i - min) / (max - min) : 0;
-    el.tip.style.left = 7 + pct * (el.pageRange.offsetWidth - 14) + 'px';
-    el.tip.hidden = false;
+    el.tip.hidden = false; // precisa estar visível para medir a largura
+    const x = 7 + pct * (el.pageRange.offsetWidth - 14);
+    const half = el.tip.offsetWidth / 2;
+    const left = el.pageRange.getBoundingClientRect().left;
+    // acompanha o controle, mas nunca sai da tela
+    el.tip.style.left = Math.max(6 + half - left, Math.min(window.innerWidth - 6 - half - left, x)) + 'px';
   }
   const hideTip = () => {
     el.tip.hidden = true;
@@ -340,15 +352,17 @@ async function main() {
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea') return;
     if ((tag === 'button' || tag === 'a') && (e.key === ' ' || e.key === 'Enter')) return;
+    // tecla segurada: uma página por animação (sem isso o livro dispara até o fim)
+    const held = e.repeat && book.flip && book.flip.committed;
     switch (e.key) {
       case 'ArrowRight':
       case 'PageDown':
       case ' ':
-        book.next();
+        if (!held) book.next();
         break;
       case 'ArrowLeft':
       case 'PageUp':
-        book.prev();
+        if (!held) book.prev();
         break;
       case 'Home':
         book.first();
@@ -402,8 +416,10 @@ async function main() {
     shown = true;
     app.classList.remove('is-loading');
     // levanta o cantinho da capa para mostrar que dá para folhear
+    // (não para quem pediu menos animações no sistema)
+    const calm = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
     setTimeout(() => {
-      if (book.index === book.minIndex && !document.hidden) book.hint();
+      if (!calm && book.index === book.minIndex && !document.hidden) book.hint();
     }, 1200);
   };
   book.addEventListener('pageimage', (e) => {

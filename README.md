@@ -16,7 +16,15 @@ no GitHub Pages.
 2. Converta o PDF (isso substitui o conteúdo da pasta `book/`):
 
    ```bash
-   python tools/pdf2book.py "caminho/do/catalogo.pdf" --title "Meu Catálogo"
+   python tools/pdf2book.py "caminho/do/catalogo.pdf" --title "Meu Catálogo" --site-url https://usuario.github.io/flipbook/
+   ```
+
+   `--title` e `--site-url` só são necessários na primeira vez: nas conversões seguintes o
+   conversor reaproveita o que já está gravado (título, idioma, marca, endereço do site e os
+   ajustes feitos à mão no `book.json`). Para trocar o catálogo depois, basta:
+
+   ```bash
+   python tools/pdf2book.py "caminho/do/catalogo-novo.pdf"
    ```
 
 3. Envie para o GitHub:
@@ -37,13 +45,21 @@ O que o conversor gera:
   nítidas em qualquer ampliação. Cada página é conferida — se a recomposição não bater com o
   original, aquela página fica só com a imagem normal;
 - **links clicáveis**: os links do PDF e também sites e e-mails que aparecem escritos no texto;
-- uma cópia do PDF para o botão **Baixar**.
+- uma cópia do PDF para o botão **Baixar**;
+- a **prévia de compartilhamento** (`book/cover.jpg` + título no `index.html`): é o cartão com a
+  capa que aparece quando o link é enviado por WhatsApp ou redes sociais. Precisa do endereço
+  público do site (`--site-url`), informado uma vez.
+
+Se o PDF tiver páginas de formatos diferentes, vale o formato da maioria; as outras são
+centralizadas em branco (o conversor avisa quais).
 
 Opções:
 
 | Opção | Para quê |
 | --- | --- |
-| `--title "Nome"` | título mostrado no topo |
+| `--title "Nome"` | título mostrado no topo e na prévia de compartilhamento |
+| `--site-url https://...` | endereço público do site, para a prévia de compartilhamento |
+| `--description "Frase"` | frase curta que acompanha o título na prévia |
 | `--lang pt` / `en` / `es` | idioma dos botões e dicas (sem isso, usa o idioma do navegador de quem abre) |
 | `--brand "Minha Empresa"` | texto pequeno no canto superior direito |
 | `--out outra-pasta` | grava em outra pasta — dá para ter vários catálogos: abra com `index.html?book=outra-pasta` |
@@ -124,6 +140,7 @@ tools/make_demo_pages.py   gera o livro de demonstração
 - `version` muda a cada conversão e evita que o navegador mostre páginas antigas em cache.
 - `"sound": false` desliga o som por padrão; `"maxZoom": 8` muda o limite do zoom.
 - `logo` é um arquivo dentro da pasta do livro, mostrado no canto superior direito.
+- `logo`, `sound` e `maxZoom` são editados à mão e continuam valendo depois de reconverter.
 
 ## Como a virada funciona
 

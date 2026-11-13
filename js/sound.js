@@ -10,6 +10,7 @@ export class PageSound {
     this.ctx = null;
     this.bufs = [];
     this._last = -1;
+    this._lastAt = 0;
   }
 
   _init() {
@@ -73,11 +74,39 @@ export class PageSound {
     return buf;
   }
 
-  /** Deve ser chamado dentro de um gesto do usuário na primeira vez (política dos navegadores). */
+  /**
+   * Toca o som de uma virada. Os navegadores só liberam áudio depois de um gesto do
+   * usuário (clique, toque, tecla): enquanto estiver bloqueado, a virada fica muda —
+   * nada é enfileirado para "estourar" tudo junto mais tarde.
+   */
   play(volume = 1) {
     if (!this.enabled || !this._init()) return;
     const ctx = this.ctx;
-    if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    if (ctx.state !== 'running') {
+      const t0 = performance.now();
+      let p;
+      try {
+        p = ctx.resume();
+      } catch (_) {}
+      if (p && p.then) {
+        p.then(
+          () => {
+            if (ctx.state === 'running' && performance.now() - t0 < 200) this._fire(volume);
+          },
+          () => {}
+        );
+      }
+      return;
+    }
+    this._fire(volume);
+  }
+
+  _fire(volume) {
+    const ctx = this.ctx;
+    // viradas em sequência muito rápida: não empilha sons
+    const now = performance.now();
+    if (now - this._lastAt < 90) return;
+    this._lastAt = now;
     let v = Math.floor(Math.random() * this.bufs.length);
     if (v === this._last) v = (v + 1) % this.bufs.length;
     this._last = v;

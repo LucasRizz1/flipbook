@@ -469,6 +469,7 @@ input { font: inherit; color: inherit; }
 .is-loading .fb-arrow,
 .no-arrows .fb-arrow { display: none; }
 .is-zoomed .fb-arrow { color: #fff; background: rgba(40, 44, 50, .42); opacity: .9; }
+.is-zoomed .fb-arrow:disabled { opacity: 0; }
 
 /* ---------------------------------------------------------------------
    Painel de miniaturas
@@ -653,6 +654,7 @@ input { font: inherit; color: inherit; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .fb-page:not(.fb-has) { animation: none; }
+  .fb-page:not(.fb-has):not(.fb-ghost) { animation: none; }
+  .fb-link { animation: none; }
   .fb-loader-book i { animation-duration: 3s; }
 }

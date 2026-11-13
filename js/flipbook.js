@@ -106,16 +106,26 @@ export class FlipBook extends EventTarget {
     this.g = null;
     this._raf = 0;
     this._wheelLock = 0;
+    this._wheelT = 0;
+    this._wheelAcc = 0;
+    this._wheelFired = false;
+    this._wheelMin = Infinity;
     this._lastTap = null;
     this._inertia = 0;
     this._qTimer = 0;
     this.ql = 0; // nível de qualidade das sombras (ver QUALITY e _judgeFrames)
     this.q = QUALITY[0];
     this._slow = 0;
+    this._slowSum = 0;
+    this._trial = null;
+    this._qLock = false;
+    this._idleDt = 0;
+    this._idleBusy = false;
     this._tick = this._tick.bind(this);
     this._build();
     this._bind();
     this.layout();
+    this._measureIdle();
   }
 
   /* ------------------------------------------------------------------ */
@@ -343,8 +353,9 @@ export class FlipBook extends EventTarget {
     img.draggable = false;
     img.decoding = 'async';
     const done = () => {
-      if (p.have >= w || !this.pages.has(n)) return;
+      if (p.have >= w || this.pages.get(n) !== p) return;
       p.have = w;
+      p.tries = 0;
       p.img.replaceWith(img);
       p.img = img;
       p.el.classList.add('fb-has');
@@ -352,6 +363,14 @@ export class FlipBook extends EventTarget {
     };
     const fail = () => {
       if (p.want === w) p.want = p.have;
+      // conexão caiu? tenta de novo (até 3 vezes) enquanto a página estiver à vista
+      const shown = () => this.pages.get(n) === p && p.el.style.display !== 'none';
+      if (shown() && !p.retry && (p.tries = (p.tries || 0) + 1) <= 3) {
+        p.retry = setTimeout(() => {
+          p.retry = 0;
+          if (shown()) this._loadFor(n);
+        }, 1500 * p.tries);
+      }
     };
     img.onload = done;
     img.onerror = fail;
@@ -397,11 +416,14 @@ export class FlipBook extends EventTarget {
 
   layout() {
     this._settle();
-    const r = this.stage.getBoundingClientRect();
-    if (!r.width || !r.height) return;
-    this.rect = r;
-    this.sw = r.width;
-    this.sh = r.height;
+    // tamanho "de layout" (clientWidth/Height): não é afetado por transform no palco,
+    // como a leve escala da animação de entrada
+    const w = this.stage.clientWidth;
+    const h = this.stage.clientHeight;
+    if (!w || !h) return;
+    this.rect = this.stage.getBoundingClientRect(); // só para converter posições do ponteiro
+    this.sw = w;
+    this.sh = h;
     const ins = (this.ins = this.o.insets(this.sw, this.sh));
     const aw = Math.max(60, this.sw - ins.left - ins.right);
     const ah = Math.max(60, this.sh - ins.top - ins.bottom);
@@ -425,9 +447,11 @@ export class FlipBook extends EventTarget {
     this.flapMinX = mode === 'single' ? (gap <= 48 ? -(gap + 4) : 0) : -1e6;
     this._sizeLight();
 
+    this._stopInertia();
     this.z = 1;
     this.tx = 0;
     this.ty = 0;
+    this.stage.classList.remove('fb-zoomed', 'fb-grabbing');
     this._applyView(false);
     this._syncVector();
     this._renderRest();
@@ -443,7 +467,9 @@ export class FlipBook extends EventTarget {
   _sizeLight() {
     const { W, H } = this;
     const mx = Math.ceil(W * 0.06 + 30);
-    const my = Math.ceil(H * 0.27 + 30);
+    // a ponta da aba pode subir até (diagonal - altura) acima da página; em páginas
+    // deitadas isso é bem mais que os 27% que bastam para o A4 em pé
+    const my = Math.ceil(Math.max(H * 0.27, Math.hypot(W, H) - H + W * 0.07) + 30);
     // na página única a aba é cortada em flapMinX: não há o que desenhar além disso
     const left = (this.mode === 'single' ? Math.max(-W, this.flapMinX) : -W) - mx;
     const cw = W + mx - left;
@@ -460,20 +486,71 @@ export class FlipBook extends EventTarget {
   }
 
   /**
+   * Mede o ritmo normal de quadros deste aparelho quando nada está animando
+   * (60, 90, 120 Hz... ou 30 com o modo de economia de energia ligado).
+   * É a régua do regulador de qualidade: sem ela, um teto de 30 qps pareceria "lentidão".
+   */
+  _measureIdle() {
+    if (document.hidden || this._idleBusy) return;
+    this._idleBusy = true;
+    const d = [];
+    let last = 0;
+    const step = (t) => {
+      if (this.flip || document.hidden) {
+        this._idleBusy = false; // amostra contaminada: fica com a medida anterior
+        return;
+      }
+      if (last) d.push(t - last);
+      last = t;
+      if (d.length < 24) {
+        requestAnimationFrame(step);
+        return;
+      }
+      d.sort((a, b) => a - b);
+      this._idleDt = d[Math.floor(d.length * 0.3)];
+      this._idleBusy = false;
+    };
+    requestAnimationFrame(step);
+  }
+
+  /**
    * Regulador de qualidade: se as viradas estiverem perdendo quadros neste aparelho,
-   * reduz a resolução e o nº de passadas das sombras (quase não se nota na imagem,
-   * mas alivia bastante o trabalho por quadro).
+   * reduz a resolução e o nº de passadas das sombras (quase não se nota na imagem).
+   * Depois confere se adiantou: se o ritmo não melhorar, o gargalo não eram as sombras —
+   * volta à qualidade anterior e não mexe mais.
    */
   _judgeFrames(dts) {
-    if (dts.length < 14 || this.ql >= QUALITY.length - 1) return;
+    if (dts.length < 14 || this._qLock) return;
     const sorted = dts.slice().sort((a, b) => a - b);
-    const base = Math.max(4, sorted[Math.floor(sorted.length * 0.2)]); // intervalo normal entre quadros
-    const slow = dts.filter((d) => d > base * 1.5).length / dts.length;
+    const ref = Math.max(4, this._idleDt || sorted[Math.floor(sorted.length * 0.2)]); // ritmo normal
     const avg = dts.reduce((a, b) => a + b, 0) / dts.length;
-    // lento = muitos quadros perdidos, ou ritmo geral abaixo de ~45 qps
-    this._slow = slow > 0.1 || avg > 22 ? this._slow + 1 : 0;
-    if (this._slow >= 2) {
+    const excess = avg / ref - 1; // 0 = nenhum quadro perdido; 0.2 = 1 em cada 5 perdido
+
+    const t = this._trial;
+    if (t) {
+      t.sum += excess;
+      if (++t.n < 2) return;
+      this._trial = null;
+      if (t.sum / t.n > t.before * 0.7) {
+        this.ql = t.from;
+        this.q = QUALITY[this.ql];
+        this._sizeLight();
+        this._qLock = true;
+      }
+      return;
+    }
+
+    if (excess > 0.12) {
+      this._slow++;
+      this._slowSum += excess;
+    } else {
       this._slow = 0;
+      this._slowSum = 0;
+    }
+    if (this._slow >= 2 && this.ql < QUALITY.length - 1) {
+      this._trial = { from: this.ql, before: this._slowSum / this._slow, n: 0, sum: 0 };
+      this._slow = 0;
+      this._slowSum = 0;
       this.ql++;
       this.q = QUALITY[this.ql];
       this._sizeLight();
@@ -1183,8 +1260,9 @@ export class FlipBook extends EventTarget {
     });
     st.addEventListener('wheel', (e) => this._wheel(e), { passive: false });
     st.addEventListener('dblclick', (e) => {
-      // no toque, o duplo toque já é tratado em _tap
-      if (this._ptype !== 'mouse' || e.target.closest('a')) return;
+      // no toque, o duplo toque já é tratado em _tap; e se os dois cliques acabaram de
+      // virar páginas (clique duplo na borda), não é pedido de zoom
+      if (this._ptype !== 'mouse' || e.target.closest('a') || (this.flip && this.flip.committed)) return;
       const b = this._toBook(e.clientX, e.clientY);
       if (this.z <= 1.01 && this._zone(b) !== 0) return;
       this.toggleZoom(b.sx, b.sy);
@@ -1193,6 +1271,11 @@ export class FlipBook extends EventTarget {
     st.addEventListener('dragstart', (e) => e.preventDefault());
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) this._settle();
+      else this._measureIdle();
+    });
+    // a conexão voltou: tenta de novo as imagens das páginas à vista
+    window.addEventListener('online', () => {
+      for (const n of this.pagesAt(this.index)) this._loadFor(n);
     });
     if ('ResizeObserver' in window) {
       let first = true;
@@ -1210,7 +1293,8 @@ export class FlipBook extends EventTarget {
 
   _down(e) {
     this._ptype = e.pointerType;
-    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    // Ctrl+clique no macOS abre o menu de contexto e o "soltar" nunca chega: ignora
+    if (e.pointerType === 'mouse' && (e.button !== 0 || e.ctrlKey)) return;
     if (e.target.closest('a')) return;
     this.rect = this.stage.getBoundingClientRect();
     this.ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -1255,6 +1339,11 @@ export class FlipBook extends EventTarget {
       if (e.pointerType === 'mouse' && !e.buttons) this._hover(e);
       return;
     }
+    // mouse "arrastando" sem botão apertado = o soltar se perdeu (menu, outra janela): encerra
+    if (e.pointerType === 'mouse' && e.buttons === 0) {
+      this._up(e, true);
+      return;
+    }
     p.x = e.clientX;
     p.y = e.clientY;
     const g = this.g;
@@ -1294,9 +1383,15 @@ export class FlipBook extends EventTarget {
         this.zoomEl.style.transition = 'none';
         this.stage.classList.add('fb-grabbing');
       } else {
+        // dedo que sobrou de uma pinça não vira página
+        if (g.noTap) {
+          g.type = 'dead';
+          return;
+        }
         const start = this._toBook(g.x0, g.y0);
         let f = this.flip;
         if (f && (f.mode === 'peel' || f.mode === 'peel-out' || f.mode === 'hint')) {
+          g.fromPeel = f.mode === 'peel';
           f.anim = null;
           f.mode = 'drag';
         } else {
@@ -1313,6 +1408,7 @@ export class FlipBook extends EventTarget {
           f = this._startFlip(plan, start.y >= this.H / 2 ? this.H : 0, 'drag');
         }
         g.type = 'flip';
+        g.f = f; // o arrasto só comanda ESTA virada (teclado/roda podem iniciar outra no meio)
         // mantém parte da distância vertical entre o dedo e o canto: dobra mais natural
         g.oy = clamp(start.y, 0, this.H) - f.cy;
         this.stage.classList.add('fb-grabbing');
@@ -1321,7 +1417,7 @@ export class FlipBook extends EventTarget {
 
     if (g.type === 'flip') {
       const f = this.flip;
-      if (!f) return;
+      if (!f || f !== g.f) return;
       const b = this._toBook(e.clientX, e.clientY);
       f.T = { x: f.s * b.x, y: b.y - g.oy * 0.72 };
       this._schedule();
@@ -1359,13 +1455,14 @@ export class FlipBook extends EventTarget {
       if (this.ptrs.size >= 2) return;
       this.g = null;
       // acomoda dentro dos limites, mantendo fixo o ponto entre os dedos
-      const z = clamp(this.z, 1, this.o.maxZoom);
+      let z = clamp(this.z, 1, this.o.maxZoom);
+      if (z < 1.02) z = 1; // quase sem zoom = sem zoom (evita a barra de zoom "presa")
       const px = (g.mx - this.tx) / this.z;
       const py = (g.my - this.ty) / this.z;
       this.setView(z, g.mx - z * px, g.my - z * py, true);
       this._emit('zoom', { z: this.z });
       this._refreshQuality();
-      // o dedo que ficou continua como arrasto
+      // o dedo que ficou continua como arrasto (para mover a página ampliada)
       if (this.ptrs.size === 1) {
         const [id, p] = [...this.ptrs.entries()][0];
         this.g = { type: 'pending', id, ptype: e.pointerType, x0: p.x, y0: p.y, t0: performance.now(), samples: [], noTap: true };
@@ -1381,14 +1478,27 @@ export class FlipBook extends EventTarget {
       if (!cancelled && !g.noTap) this._tap(e, g);
     } else if (g.type === 'flip') {
       const f = this.flip;
-      if (!f) return;
+      if (!f || f !== g.f) return;
+      const moved = Math.abs(e.clientX - g.x0);
+      const slip = moved < Math.max(16, this.W * 0.04);
+      // toque "escorregado" (mexeu poucos pixels, rapidinho): vale como toque, não como arrasto
+      if (slip && !cancelled && performance.now() - g.t0 < 300) {
+        if (g.fromPeel) {
+          this._release(f, true); // clique no cantinho levantado: vira
+        } else {
+          this._finishFlip(false);
+          this._tap(e, g);
+        }
+        return;
+      }
       const { vx } = this._velocity(g);
       const v = vx * f.s; // velocidade no espaço da folha (negativa = indo virar)
       const tx = f.T ? f.T.x : f.P.x;
       let far; // a folha vai para o lado "virado"?
-      if (cancelled) far = f.reverse;
+      if (cancelled || slip) far = f.reverse; // volta para onde estava
       else if (v < -0.32) far = true;
       else if (v > 0.32) far = false;
+      else if (moved < this.W * 0.15) far = f.reverse; // arrasto curto e lento: desiste
       else far = tx < this.W * (this.mode === 'double' ? 0.3 : 0.45);
       this._release(f, f.reverse ? !far : far);
     } else if (g.type === 'pan') {
@@ -1410,14 +1520,18 @@ export class FlipBook extends EventTarget {
   _tap(e, g) {
     const now = performance.now();
     const b = this._toBook(e.clientX, e.clientY);
+    // toque numa borda que vira página é navegação: dois toques seguidos ali viram duas
+    // páginas, não dão zoom (mesma regra do clique duplo com o mouse)
+    const zone = this.z <= 1.01 ? this._zone(b) : 0;
+    const nav = zone !== 0 && !!this._plan(zone);
     if (g.ptype !== 'mouse') {
       const lt = this._lastTap;
-      if (lt && now - lt.t < 320 && Math.hypot(lt.x - e.clientX, lt.y - e.clientY) < 44) {
+      if (lt && !lt.nav && !nav && now - lt.t < 320 && Math.hypot(lt.x - e.clientX, lt.y - e.clientY) < 44) {
         this._lastTap = null;
         this.toggleZoom(b.sx, b.sy);
         return;
       }
-      this._lastTap = { t: now, x: e.clientX, y: e.clientY };
+      this._lastTap = { t: now, x: e.clientX, y: e.clientY, nav };
     }
     if (this.z > 1.01) return;
     const f = this.flip;
@@ -1507,6 +1621,11 @@ export class FlipBook extends EventTarget {
     if (e.ctrlKey || e.metaKey) {
       const b = this._toBook(e.clientX, e.clientY);
       this.zoomAt(this.z * Math.exp(-e.deltaY * unit * 0.0045), b.sx, b.sy, false);
+      // terminou quase sem zoom? volta para o tamanho normal (a barra de zoom não fica "presa")
+      clearTimeout(this._wzTimer);
+      this._wzTimer = setTimeout(() => {
+        if (this.z > 1 && this.z <= 1.01) this.setView(1, 0, 0, true);
+      }, 220);
       return;
     }
     if (this.z > 1.01) {
@@ -1514,8 +1633,45 @@ export class FlipBook extends EventTarget {
       return;
     }
     const d = (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY) * unit;
+    const a = Math.abs(d);
     const now = performance.now();
-    if (Math.abs(d) < 14 || now < this._wheelLock) return;
+    // roda de mouse com "dentes" (passos inteiros) x trackpad (fluxo contínuo com inércia)
+    const notched =
+      e.deltaMode === 1 ||
+      (e.deltaX === 0 && a >= 50 && (e.wheelDeltaY !== undefined ? e.wheelDeltaY % 120 === 0 : a >= 100));
+    if (notched) {
+      if (now < this._wheelLock) return;
+      // se for um trackpad que "pareceu" roda, o resto do gesto segue a regra de inércia
+      this._wheelT = now;
+      this._wheelFired = true;
+      this._wheelAcc = 0;
+      this._wheelMin = a;
+    } else {
+      const gap = now - this._wheelT;
+      this._wheelT = now;
+      if (gap > 180) {
+        // pausa = gesto novo
+        this._wheelAcc = 0;
+        this._wheelFired = false;
+      }
+      if (!this._wheelFired) {
+        // junta os pequenos deslocamentos até formar um "empurrão" de verdade
+        if (this._wheelAcc * d < 0) this._wheelAcc = 0;
+        this._wheelAcc += d;
+        if (Math.abs(this._wheelAcc) < 30 || now < this._wheelLock) return;
+      } else {
+        // mesmo gesto, página já virada: a inércia só diminui; só um novo impulso (que cresce) vira outra
+        if (now < this._wheelLock) {
+          this._wheelMin = Infinity;
+          return;
+        }
+        this._wheelMin = Math.min(this._wheelMin, a);
+        if (a < 14 || a < this._wheelMin * 2) return;
+      }
+      this._wheelFired = true;
+      this._wheelAcc = 0;
+      this._wheelMin = a;
+    }
     this._wheelLock = now + 620;
     if (d > 0) this.next();
     else this.prev();
