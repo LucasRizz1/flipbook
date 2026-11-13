@@ -45,6 +45,13 @@ function clipHalf(poly, nx, ny, mx, my, sign) {
   return out;
 }
 
+/** Níveis de qualidade das sombras: escala do canvas (teto) e nº de passadas da sombra suave. */
+const QUALITY = [
+  { scale: 2, steps: 26 },
+  { scale: 1.5, steps: 18 },
+  { scale: 1, steps: 12 },
+];
+
 function tracePoly(path, pts) {
   path.moveTo(pts[0][0], pts[0][1]);
   for (let i = 1; i < pts.length; i++) path.lineTo(pts[i][0], pts[i][1]);
@@ -102,6 +109,9 @@ export class FlipBook extends EventTarget {
     this._lastTap = null;
     this._inertia = 0;
     this._qTimer = 0;
+    this.ql = 0; // nível de qualidade das sombras (ver QUALITY e _judgeFrames)
+    this.q = QUALITY[0];
+    this._slow = 0;
     this._tick = this._tick.bind(this);
     this._build();
     this._bind();
@@ -410,24 +420,10 @@ export class FlipBook extends EventTarget {
     this.stage.dataset.mode = mode;
     if (modeChanged) for (const [n, p] of this.pages) p.el.className = 'fb-page ' + this._sideClass(n) + (p.have ? ' fb-has' : '');
 
-    // canvas de luz: cobre o livro + margem para a aba que "sai" da página
-    const mx = Math.ceil(this.W * 0.06 + 30);
-    const my = Math.ceil(this.H * 0.27 + 30);
-    const cw = 2 * (this.W + mx);
-    const ch = this.H + 2 * my;
-    let k = Math.min(window.devicePixelRatio || 1, 2);
-    const maxPx = 3.2e6;
-    if (cw * ch * k * k > maxPx) k = Math.sqrt(maxPx / (cw * ch));
-    this.light.width = Math.round(cw * k);
-    this.light.height = Math.round(ch * k);
-    this.light.style.cssText = `left:${-(this.W + mx)}px;top:${-my}px;width:${cw}px;height:${ch}px`;
-    this.lk = this.light.width / cw;
-    this.lox = this.W + mx;
-    this.loy = my;
-
     // limite esquerdo da aba no modo de página única (ver _renderFlip)
     const gap = this.cx - this.W / 2;
     this.flapMinX = mode === 'single' ? (gap <= 48 ? -(gap + 4) : 0) : -1e6;
+    this._sizeLight();
 
     this.z = 1;
     this.tx = 0;
@@ -438,6 +434,50 @@ export class FlipBook extends EventTarget {
     this._preloadAround();
     this._emit('layout', this.info());
     this._emit('zoom', { z: 1 });
+  }
+
+  /**
+   * Dimensiona o canvas de luz (sombras e brilho): cobre o livro mais uma margem
+   * para a aba que "sai" da página. A resolução segue o nível de qualidade atual.
+   */
+  _sizeLight() {
+    const { W, H } = this;
+    const mx = Math.ceil(W * 0.06 + 30);
+    const my = Math.ceil(H * 0.27 + 30);
+    // na página única a aba é cortada em flapMinX: não há o que desenhar além disso
+    const left = (this.mode === 'single' ? Math.max(-W, this.flapMinX) : -W) - mx;
+    const cw = W + mx - left;
+    const ch = H + 2 * my;
+    let k = Math.min(window.devicePixelRatio || 1, this.q.scale);
+    const maxPx = 3.2e6;
+    if (cw * ch * k * k > maxPx) k = Math.sqrt(maxPx / (cw * ch));
+    this.light.width = Math.round(cw * k);
+    this.light.height = Math.round(ch * k);
+    this.light.style.cssText = `left:${left}px;top:${-my}px;width:${cw}px;height:${ch}px;visibility:hidden`;
+    this.lk = this.light.width / cw;
+    this.lox = -left;
+    this.loy = my;
+  }
+
+  /**
+   * Regulador de qualidade: se as viradas estiverem perdendo quadros neste aparelho,
+   * reduz a resolução e o nº de passadas das sombras (quase não se nota na imagem,
+   * mas alivia bastante o trabalho por quadro).
+   */
+  _judgeFrames(dts) {
+    if (dts.length < 14 || this.ql >= QUALITY.length - 1) return;
+    const sorted = dts.slice().sort((a, b) => a - b);
+    const base = Math.max(4, sorted[Math.floor(sorted.length * 0.2)]); // intervalo normal entre quadros
+    const slow = dts.filter((d) => d > base * 1.5).length / dts.length;
+    const avg = dts.reduce((a, b) => a + b, 0) / dts.length;
+    // lento = muitos quadros perdidos, ou ritmo geral abaixo de ~45 qps
+    this._slow = slow > 0.1 || avg > 22 ? this._slow + 1 : 0;
+    if (this._slow >= 2) {
+      this._slow = 0;
+      this.ql++;
+      this.q = QUALITY[this.ql];
+      this._sizeLight();
+    }
   }
 
   _spineAt(index) {
@@ -674,6 +714,7 @@ export class FlipBook extends EventTarget {
     this.stage.classList.remove('fb-flipping', 'fb-peeling');
     this._renderRest();
     this._preloadAround();
+    if (completed && f.dts && !document.hidden) this._judgeFrames(f.dts);
     // com zoom ativo, a área do livro pode ter mudado (capa ↔ página dupla)
     if (this.z > 1.001) {
       this.setView(this.z, this.tx, this.ty, true);
@@ -703,6 +744,7 @@ export class FlipBook extends EventTarget {
     const f = this.flip;
     if (!f) return;
     const dt = f.last ? Math.min(64, now - f.last) : 16;
+    if (f.last && f.anim && f.committed) (f.dts || (f.dts = [])).push(now - f.last);
     f.last = now;
     if (f.anim) {
       const a = f.anim;
@@ -856,7 +898,7 @@ export class FlipBook extends EventTarget {
     if (flap.length >= 3) {
       const R = (4 + 24 * arc) * u;
       const A = (0.13 + 0.15 * arc) * fade;
-      const steps = 26;
+      const steps = this.q.steps;
       const a = 1 - Math.pow(1 - A, 1 / steps);
       ctx.save();
       const outside = new Path2D();
